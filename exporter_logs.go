@@ -164,7 +164,7 @@ CREATE TABLE IF NOT EXISTS %s %s (
 	LogAttributes Map(LowCardinality(String), String) CODEC(ZSTD(1)),
 
 	INDEX idx_tenant Tenant TYPE bloom_filter(0.001) GRANULARITY 1,
-	INDEX idx_trace_id Trace TYPE bloom_filter(0.001) GRANULARITY 1,
+	INDEX idx_trace_id TraceId TYPE bloom_filter(0.001) GRANULARITY 1,
 	INDEX idx_res_attr_key mapKeys(ResourceAttributes) TYPE bloom_filter(0.01) GRANULARITY 1,
 	INDEX idx_res_attr_value mapValues(ResourceAttributes) TYPE bloom_filter(0.01) GRANULARITY 1,
 	INDEX idx_scope_attr_key mapKeys(ScopeAttributes) TYPE bloom_filter(0.01) GRANULARITY 1,

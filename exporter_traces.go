@@ -6,11 +6,13 @@ package clickhouseexporter // import "github.com/open-telemetry/opentelemetry-co
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	_ "github.com/ClickHouse/clickhouse-go/v2" // For register database driver.
+	"go.opentelemetry.io/collector/client"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 	conventions "go.opentelemetry.io/collector/semconv/v1.18.0"
@@ -62,6 +64,13 @@ func (e *tracesExporter) shutdown(_ context.Context) error {
 }
 
 func (e *tracesExporter) pushTraceData(ctx context.Context, td ptrace.Traces) error {
+	cl := client.FromContext(ctx)
+	tenantIdA := cl.Metadata.Get("x-tenant")
+	if len(tenantIdA) != 1 {
+		return errors.New("unable to get headers")
+	}
+	tenantId := tenantIdA[0]
+
 	start := time.Now()
 	err := doWithTx(ctx, e.client, func(tx *sql.Tx) error {
 		statement, err := tx.PrepareContext(ctx, e.insertSQL)
@@ -91,6 +100,7 @@ func (e *tracesExporter) pushTraceData(ctx context.Context, td ptrace.Traces) er
 					linksTraceIDs, linksSpanIDs, linksTraceStates, linksAttrs := convertLinks(r.Links())
 					_, err = statement.ExecContext(ctx,
 						r.StartTimestamp().AsTime(),
+						tenantId,
 						traceutil.TraceIDToHexOrEmptyString(r.TraceID()),
 						traceutil.SpanIDToHexOrEmptyString(r.SpanID()),
 						traceutil.SpanIDToHexOrEmptyString(r.ParentSpanID()),
@@ -164,6 +174,7 @@ const (
 	createTracesTableSQL = `
 CREATE TABLE IF NOT EXISTS %s %s (
      Timestamp DateTime64(9) CODEC(Delta, ZSTD(1)),
+     Tenant String CODEC(ZSTD(1)),
      TraceId String CODEC(ZSTD(1)),
      SpanId String CODEC(ZSTD(1)),
      ParentSpanId String CODEC(ZSTD(1)),
@@ -189,6 +200,7 @@ CREATE TABLE IF NOT EXISTS %s %s (
          TraceState String,
          Attributes Map(LowCardinality(String), String)
      ) CODEC(ZSTD(1)),
+     INDEX idx_tenant Tenant TYPE bloom_filter(0.001) GRANULARITY 1,
      INDEX idx_trace_id TraceId TYPE bloom_filter(0.001) GRANULARITY 1,
      INDEX idx_res_attr_key mapKeys(ResourceAttributes) TYPE bloom_filter(0.01) GRANULARITY 1,
      INDEX idx_res_attr_value mapValues(ResourceAttributes) TYPE bloom_filter(0.01) GRANULARITY 1,
@@ -204,6 +216,7 @@ SETTINGS index_granularity=8192, ttl_only_drop_parts = 1;
 	// language=ClickHouse SQL
 	insertTracesSQLTemplate = `INSERT INTO %s (
                         Timestamp,
+                        Tenant,
                         TraceId,
                         SpanId,
                         ParentSpanId,
@@ -247,6 +260,7 @@ SETTINGS index_granularity=8192, ttl_only_drop_parts = 1;
                                   ?,
                                   ?,
                                   ?,
+                                  ?,
                                   ?
                                   )`
 )
@@ -254,9 +268,11 @@ SETTINGS index_granularity=8192, ttl_only_drop_parts = 1;
 const (
 	createTraceIDTsTableSQL = `
 create table IF NOT EXISTS %s_trace_id_ts %s (
+     Tenant String CODEC(ZSTD(1)),
      TraceId String CODEC(ZSTD(1)),
      Start DateTime64(9) CODEC(Delta, ZSTD(1)),
      End DateTime64(9) CODEC(Delta, ZSTD(1)),
+     INDEX idx_tenant Tenant TYPE bloom_filter(0.01) GRANULARITY 1,
      INDEX idx_trace_id TraceId TYPE bloom_filter(0.01) GRANULARITY 1
 ) ENGINE = %s
 %s
@@ -267,13 +283,14 @@ SETTINGS index_granularity=8192;
 CREATE MATERIALIZED VIEW IF NOT EXISTS %s_trace_id_ts_mv %s
 TO %s.%s_trace_id_ts
 AS SELECT
+Tenant,
 TraceId,
 min(Timestamp) as Start,
 max(Timestamp) as End
 FROM
 %s.%s
 WHERE TraceId!=''
-GROUP BY TraceId;
+GROUP BY Tenant, TraceId;
 `
 )
 

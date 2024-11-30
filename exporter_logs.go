@@ -6,13 +6,16 @@ package clickhouseexporter // import "github.com/open-telemetry/opentelemetry-co
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
 	_ "github.com/ClickHouse/clickhouse-go/v2" // For register database driver.
+	"go.opentelemetry.io/collector/client"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
+
 	conventions "go.opentelemetry.io/collector/semconv/v1.18.0"
 	"go.uber.org/zap"
 
@@ -62,6 +65,13 @@ func (e *logsExporter) shutdown(_ context.Context) error {
 }
 
 func (e *logsExporter) pushLogsData(ctx context.Context, ld plog.Logs) error {
+	cl := client.FromContext(ctx)
+	tenantIdA := cl.Metadata.Get("x-tenant")
+	if len(tenantIdA) != 1 {
+		return errors.New("unable to get headers")
+	}
+	tenantId := tenantIdA[0]
+
 	start := time.Now()
 	err := doWithTx(ctx, e.client, func(tx *sql.Tx) error {
 		statement, err := tx.PrepareContext(ctx, e.insertSQL)
@@ -91,6 +101,7 @@ func (e *logsExporter) pushLogsData(ctx context.Context, ld plog.Logs) error {
 					logAttr := attributesToMap(r.Attributes())
 					_, err = statement.ExecContext(ctx,
 						r.Timestamp().AsTime(),
+						tenantId,
 						traceutil.TraceIDToHexOrEmptyString(r.TraceID()),
 						traceutil.SpanIDToHexOrEmptyString(r.SpanID()),
 						uint32(r.Flags()),
@@ -136,6 +147,7 @@ CREATE TABLE IF NOT EXISTS %s %s (
 	Timestamp DateTime64(9) CODEC(Delta(8), ZSTD(1)),
 	TimestampDate Date DEFAULT toDate(Timestamp),
 	TimestampTime DateTime DEFAULT toDateTime(Timestamp),
+	Tenant String CODEC(ZSTD(1)),
 	TraceId String CODEC(ZSTD(1)),
 	SpanId String CODEC(ZSTD(1)),
 	TraceFlags UInt8,
@@ -151,7 +163,8 @@ CREATE TABLE IF NOT EXISTS %s %s (
 	ScopeAttributes Map(LowCardinality(String), String) CODEC(ZSTD(1)),
 	LogAttributes Map(LowCardinality(String), String) CODEC(ZSTD(1)),
 
-	INDEX idx_trace_id TraceId TYPE bloom_filter(0.001) GRANULARITY 1,
+	INDEX idx_tenant Tenant TYPE bloom_filter(0.001) GRANULARITY 1,
+	INDEX idx_trace_id Trace TYPE bloom_filter(0.001) GRANULARITY 1,
 	INDEX idx_res_attr_key mapKeys(ResourceAttributes) TYPE bloom_filter(0.01) GRANULARITY 1,
 	INDEX idx_res_attr_value mapValues(ResourceAttributes) TYPE bloom_filter(0.01) GRANULARITY 1,
 	INDEX idx_scope_attr_key mapKeys(ScopeAttributes) TYPE bloom_filter(0.01) GRANULARITY 1,
@@ -168,6 +181,7 @@ SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
 	// language=ClickHouse SQL
 	insertLogsSQLTemplate = `INSERT INTO %s (
                         Timestamp,
+                        Tenant,
                         TraceId,
                         SpanId,
                         TraceFlags,
@@ -183,6 +197,7 @@ SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
                         ScopeAttributes,
                         LogAttributes
                         ) VALUES (
+                                  ?,
                                   ?,
                                   ?,
                                   ?,
